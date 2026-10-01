@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ランチマッチングツール</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@300;400;500;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <div class="logo">ランチ<span>マッチング</span>ツール</div>
+  <div class="header-sub">Lunch Matching Tool</div>
+</header>
+
+<main>
+  <div class="card">
+    <div class="card-title">データ入力</div>
+    <div class="info-box">
+      Googleスプレッドシートを <strong>全選択 → コピー</strong> してそのまま貼り付けてください。<br>
+      必須列：<code>user_id</code> <code>first_name_ja</code> <code>last_name_ja</code> <code>location_name</code> <code>team_name</code>（列順は自動検出）<br>
+      任意列：<code>category_type</code> <code>tag_name</code>（<code>category_type</code> が <code>3</code> の行を <strong>職種</strong> として表示に使います）<br>
+      拠点は <strong>東京・大阪・その他</strong>（東京・大阪以外はすべて「その他」）に分けて、拠点ごとに3人組をつくります。<br>
+      <strong>3人全員が同じチーム</strong>になる組み合わせだけは作りません。職種の被りは気にしません。<br>
+      3で割り切れない場合は、一部のグループを4人組にします。
+    </div>
+    <textarea id="raw-data" placeholder="tag_id&#9;tag_name&#9;user_id&#9;first_name_ja&#9;last_name_ja&#9;...&#9;location_name&#9;category_type&#9;category_name&#9;team_id&#9;team_name&#9;email&#9;join_date&#9;birthday
+（スプレッドシートをそのままコピー＆ペーストしてください）"></textarea>
+
+    <div class="exclude-grid">
+      <div class="exclude-col">
+        <label class="exclude-label">除外するメンバー（任意）</label>
+        <div class="exclude-hint">休職者・不参加者など、今回のランチから外す人を1行に1人ずつ「姓 名」で入力してください。</div>
+        <textarea id="exclude-members" class="exclude-textarea" placeholder="例：&#10;不参加 太郎&#10;休職 花子"></textarea>
+      </div>
+      <div class="exclude-col">
+        <label class="exclude-label">アナウンス見出し</label>
+        <div class="exclude-hint">結果をコピーするときの1行目に入ります。</div>
+        <input id="announce-title" type="text" value="【シャッフルランチ】今回のランチメンバーが決まりました！🍱">
+        <label class="exclude-label" style="margin-top:12px">アナウンス締めの一言（任意）</label>
+        <input id="announce-footer" type="text" value="各グループで日程を調整して、ランチに行ってきてください！">
+      </div>
+    </div>
+
+    <div id="parse-err" class="err-msg"></div>
+    <div class="btn-row">
+      <button class="primary" onclick="parseAndRun()">▶ グループ作成</button>
+      <button onclick="loadSample()">サンプルデータを読み込む</button>
+      <button onclick="clearAll()">クリア</button>
+    </div>
+  </div>
+
+  <div id="result-section" class="card">
+    <div class="card-title">グループ分け結果</div>
+    <div class="stats" id="stats-area"></div>
+
+    <div class="tab-row">
+      <button class="tab active" data-loc="all" onclick="filterLoc('all')">すべて</button>
+      <button class="tab" data-loc="東京" onclick="filterLoc('東京')"><span class="badge badge-1">東京</span></button>
+      <button class="tab" data-loc="大阪" onclick="filterLoc('大阪')"><span class="badge badge-2">大阪</span></button>
+      <button class="tab" data-loc="その他" onclick="filterLoc('その他')"><span class="badge badge-3">その他</span></button>
+    </div>
+
+    <div class="filter-row">
+      <button onclick="parseAndRun()">🔀 シャッフルし直す</button>
+      <div class="copy-group">
+        <button class="copy-btn" onclick="copyAnnounce(event)">📣 アナウンス文をコピー</button>
+        <button class="copy-btn" onclick="copyTSV(event)">📋 TSVコピー（スプレッドシートに貼付け）</button>
+      </div>
+    </div>
+
+    <div id="group-area" class="group-grid"></div>
+  </div>
+</main>
+
+<script src="lunch.js"></script>
+</body>
+</html>
