@@ -28,9 +28,11 @@ function buildSample() {
 // 状態
 // =============================================
 const LOCATIONS = ['東京', '大阪', 'その他'];
-let allGroups = [];      // { no, loc, members: [person], ok: bool }
+let allGroups = [];      // { no, loc, members: [person], ok, repeatTrio, recentPairs }
 let unmatchedByLoc = {}; // loc → [person]（人数不足でグループにできなかった人）
 let currentLoc = 'all';
+let currentMonth = '';   // 'YYYY-MM'
+let historyInfo = null;  // 読み込んだ履歴の集計
 
 // =============================================
 // UI操作
@@ -42,6 +44,7 @@ function loadSample() {
 function clearAll() {
   document.getElementById('raw-data').value = '';
   document.getElementById('exclude-members').value = '';
+  document.getElementById('history-data').value = '';
   const errEl = document.getElementById('parse-err');
   errEl.style.display = 'none';
   errEl.innerHTML = '';
@@ -52,6 +55,13 @@ function clearAll() {
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
+
+// 実施月の初期値は今月
+(function initMonth() {
+  const d = new Date();
+  document.getElementById('current-month').value =
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+})();
 
 // =============================================
 // 除外設定のパース
@@ -147,14 +157,108 @@ function parseData(raw) {
 }
 
 // =============================================
+// 履歴パース
+//
+// 履歴シート（「TSVコピー」の出力を追記していったもの）を読み込む。
+//   実施月 + グループ → 1つのランチグループ
+//   user_id（なければ 氏名）→ 人物の照合キー
+//
+// 返す集合:
+//   trios : 過去の全グループに含まれる「3人の組み合わせ」すべて（期間無制限）
+//   pairs : 直近 pairWindow か月のグループに含まれる「2人の組み合わせ」すべて
+// 今回の実施月以降の履歴は（再実行時の二重カウントを防ぐため）無視する。
+// =============================================
+
+// '2026-10' / '2026/10' / '2026/10/1' / '2026年10月' → 2026*12+9 の通し月番号
+function monthIndex(s) {
+  const m = String(s || '').match(/(\d{4})\D+(\d{1,2})/);
+  if (!m) return NaN;
+  const mon = parseInt(m[2], 10);
+  if (mon < 1 || mon > 12) return NaN;
+  return parseInt(m[1], 10) * 12 + (mon - 1);
+}
+
+function combos(arr, k) {
+  const out = [];
+  const rec = (start, picked) => {
+    if (picked.length === k) { out.push(picked.slice()); return; }
+    for (let i = start; i < arr.length; i++) { picked.push(arr[i]); rec(i + 1, picked); picked.pop(); }
+  };
+  rec(0, []);
+  return out;
+}
+
+const comboKey = ids => ids.slice().sort().join('|');
+
+function parseHistory(raw, people, curIdx, pairWindow) {
+  const empty = { trios: new Set(), pairs: new Set(), groupCount: 0, recentCount: 0, ignoredFuture: 0, unknown: [] };
+  const lines = raw.replace(/\r/g, '').trim().split('\n').filter(l => l.trim());
+  if (!lines.length) return empty;
+
+  const headers = lines[0].split('\t').map(h => h.trim());
+  const iMonth = headers.indexOf('実施月');
+  const iGroup = headers.indexOf('グループ');
+  const iUid   = headers.indexOf('user_id');
+  const iName  = headers.indexOf('氏名');
+  if (iMonth === -1) throw new Error('履歴に列「実施月」が見つかりません。ヘッダー行を確認してください。');
+  if (iGroup === -1) throw new Error('履歴に列「グループ」が見つかりません。ヘッダー行を確認してください。');
+  if (iUid === -1 && iName === -1) throw new Error('履歴に列「user_id」または「氏名」が必要です。');
+
+  const byName = new Map(people.map(p => [normalizeName(p.name), p.uid]));
+  const groups = new Map(); // '月|グループ' → { idx, ids:Set }
+  const unknown = new Set();
+
+  lines.slice(1).forEach(line => {
+    const cols = line.split('\t');
+    const idx = monthIndex(cols[iMonth]);
+    const g = (cols[iGroup] || '').trim();
+    if (isNaN(idx) || !g) return;
+    let id = iUid >= 0 ? (cols[iUid] || '').trim() : '';
+    if (!id && iName >= 0) {
+      const nm = normalizeName(cols[iName]);
+      if (!nm) return;
+      id = byName.get(nm) || 'name:' + nm;
+      if (!byName.has(nm)) unknown.add((cols[iName] || '').trim());
+    }
+    if (!id) return;
+    const key = idx + '|' + g;
+    if (!groups.has(key)) groups.set(key, { idx, ids: new Set() });
+    groups.get(key).ids.add(id);
+  });
+
+  const res = { ...empty, unknown: [...unknown] };
+  groups.forEach(({ idx, ids }) => {
+    if (idx >= curIdx) { res.ignoredFuture++; return; }
+    const arr = [...ids];
+    if (arr.length < 2) return;
+    res.groupCount++;
+    combos(arr, 3).forEach(c => res.trios.add(comboKey(c)));
+    if (pairWindow > 0 && idx >= curIdx - pairWindow) {
+      res.recentCount++;
+      combos(arr, 2).forEach(c => res.pairs.add(comboKey(c)));
+    }
+  });
+  return res;
+}
+
+// =============================================
 // グループ分けロジック
 //
 // ・拠点（東京 / 大阪 / その他）ごとに3人組をつくる
-// ・NG条件：グループ全員が同じチーム（2人同じ＋1人別はOK）
+// ・NG条件（必ず避ける）:
+//     - グループ全員が同じチーム（2人同じ＋1人別はOK）
+//     - 過去に同じグループだった3人がそろう（4人組・5人組の中に含まれる場合も）
+// ・なるべく避ける: 直近の指定期間に同じグループだった2人
 // ・職種は考慮しない
 // ・3で割り切れない場合：余り1 → 4人組×1、余り2 → 4人組×2
 //   （5人だけの拠点は 5人組×1、2人以下の拠点はグループを作らず警告）
+//
+// 方式: ランダムに区切った後、問題のあるグループのメンバーを他グループと
+//       入れ替える局所探索。コスト（NG=1000点、直近ペア=1点）が下がらない
+//       入れ替えは戻す。何度かやり直して最もコストの低い結果を採用する。
 // =============================================
+const HARD = 1000;
+
 function randInt(n) {
   const a = new Uint32Array(1);
   crypto.getRandomValues(a);
@@ -179,50 +283,62 @@ function groupSizes(n) {
   return [...Array(threes).fill(3), ...Array(fours).fill(4)];
 }
 
-// 全員同じチームならNG
-function isValidGroup(members) {
-  return new Set(members.map(p => p.team)).size > 1;
+// グループの問題点を調べる
+function inspectGroup(members, hist) {
+  const ids = members.map(p => p.uid);
+  const sameTeam = new Set(members.map(p => p.team)).size <= 1;
+  const repeatTrio = hist ? combos(ids, 3).some(c => hist.trios.has(comboKey(c))) : false;
+  const recentPairs = hist && hist.pairs.size
+    ? combos(members, 2).filter(([a, b]) => hist.pairs.has(comboKey([a.uid, b.uid])))
+    : [];
+  return { sameTeam, repeatTrio, recentPairs };
 }
 
-function makeGroups(people) {
-  const sizes = groupSizes(people.length);
-  if (!sizes.length) return { groups: [], ok: false };
+function groupCost(members, hist) {
+  const r = inspectGroup(members, hist);
+  return (r.sameTeam ? HARD : 0) + (r.repeatTrio ? HARD : 0) + r.recentPairs.length;
+}
 
+function makeGroups(people, hist) {
+  const sizes = groupSizes(people.length);
+  if (!sizes.length) return [];
+
+  // 探索中の入れ替え位置は軽い Math.random で選ぶ（初期の並びは crypto で十分ランダム）
+  const rnd = n => Math.floor(Math.random() * n);
+  const deadline = Date.now() + 1500; // 条件を満たせない場合でも1.5秒で打ち切る
   let best = null;
-  for (let attempt = 0; attempt < 200; attempt++) {
-    // ランダムに並べて区切る
+  for (let attempt = 0; attempt < 30 && Date.now() < deadline; attempt++) {
     const pool = shuffle(people);
     const groups = [];
     let k = 0;
     sizes.forEach(s => { groups.push(pool.slice(k, k + s)); k += s; });
+    const costs = groups.map(g => groupCost(g, hist));
+    let total = costs.reduce((a, b) => a + b, 0);
+    let lastImproved = 0;
 
-    // NGグループがあれば、他グループのメンバーと入れ替えて解消を試みる
-    for (let iter = 0; iter < 500; iter++) {
-      const bad = groups.findIndex(g => !isValidGroup(g));
-      if (bad === -1) break;
-      const others = shuffle([...groups.keys()].filter(i => i !== bad));
-      let swapped = false;
-      for (const o of others) {
-        for (let a = 0; a < groups[bad].length && !swapped; a++) {
-          for (let b = 0; b < groups[o].length && !swapped; b++) {
-            if (groups[bad][a].team === groups[o][b].team) continue;
-            const g1 = groups[bad].slice(), g2 = groups[o].slice();
-            [g1[a], g2[b]] = [g2[b], g1[a]];
-            if (isValidGroup(g1) && isValidGroup(g2)) {
-              groups[bad] = g1; groups[o] = g2; swapped = true;
-            }
-          }
-        }
-        if (swapped) break;
+    for (let iter = 0; iter < 20000 && total > 0 && groups.length > 1; iter++) {
+      if (iter - lastImproved > 3000) break; // 改善が止まったらやり直し
+      const badIdx = costs.map((c, i) => (c > 0 ? i : -1)).filter(i => i >= 0);
+      const a = badIdx[rnd(badIdx.length)];
+      let b = rnd(groups.length - 1);
+      if (b >= a) b++;
+      const i = rnd(groups[a].length), j = rnd(groups[b].length);
+      [groups[a][i], groups[b][j]] = [groups[b][j], groups[a][i]];
+      const ca = groupCost(groups[a], hist), cb = groupCost(groups[b], hist);
+      const delta = ca + cb - costs[a] - costs[b];
+      if (delta <= 0) {
+        if (delta < 0) lastImproved = iter;
+        total += delta;
+        costs[a] = ca; costs[b] = cb;
+      } else {
+        [groups[a][i], groups[b][j]] = [groups[b][j], groups[a][i]]; // 戻す
       }
-      if (!swapped) break; // この並びでは解消できない → やり直し
     }
 
-    const badCount = groups.filter(g => !isValidGroup(g)).length;
-    if (!best || badCount < best.badCount) best = { groups, badCount };
-    if (badCount === 0) break;
+    if (!best || total < best.total) best = { groups: groups.map(g => g.slice()), total };
+    if (total === 0) break;
   }
-  return { groups: best.groups, ok: best.badCount === 0 };
+  return best.groups;
 }
 
 // =============================================
@@ -260,6 +376,28 @@ function parseAndRun() {
 
     if (people.length < 3) throw new Error('有効な社員データが3名以上必要です');
 
+    // 履歴
+    currentMonth = document.getElementById('current-month').value;
+    const curIdx = monthIndex(currentMonth);
+    const historyRaw = document.getElementById('history-data').value.trim();
+    let hist = null;
+    historyInfo = null;
+    if (historyRaw) {
+      if (isNaN(curIdx)) throw new Error('履歴を使うときは「今回の実施月」を入力してください。');
+      const pairWindow = parseInt(document.getElementById('pair-window').value, 10);
+      hist = parseHistory(historyRaw, allPeople, curIdx, pairWindow);
+      historyInfo = { ...hist, pairWindow };
+      msgs.push(`ℹ️ 履歴を読み込みました：過去${hist.groupCount}グループ（同じ3人を避ける対象）` +
+        (pairWindow > 0 ? `、うち直近${pairWindow}か月の${hist.recentCount}グループ（同じ2人をなるべく避ける対象）` : ''));
+      if (hist.ignoredFuture) {
+        msgs.push(`ℹ️ 今回の実施月（${escapeHtml(currentMonth)}）以降の履歴${hist.ignoredFuture}グループは対象外にしました。`);
+      }
+      if (hist.unknown.length) {
+        msgs.push('⚠️ 履歴の氏名のうち、社員データに見つからなかった人がいます（退職者などは問題ありません）：' +
+          hist.unknown.map(escapeHtml).join('、'));
+      }
+    }
+
     allGroups = [];
     unmatchedByLoc = {};
     let no = 1;
@@ -272,11 +410,21 @@ function parseAndRun() {
           members.map(p => escapeHtml(p.name)).join('、'));
         return;
       }
-      const { groups, ok } = makeGroups(members);
-      if (!ok) {
+      const groups = makeGroups(members, hist);
+      groups.forEach(g => {
+        const r = inspectGroup(g, hist);
+        allGroups.push({ no: no++, loc, members: g, ok: !r.sameTeam && !r.repeatTrio, ...r });
+      });
+      const locGroups = allGroups.filter(g => g.loc === loc);
+      if (locGroups.some(g => g.sameTeam)) {
         msgs.push(`⚠️ ${loc}は特定チームの人数が多いため、「全員同じチーム」のグループを完全には避けられませんでした（赤枠のグループ）。`);
       }
-      groups.forEach(g => allGroups.push({ no: no++, loc, members: g, ok: isValidGroup(g) }));
+      if (locGroups.some(g => g.repeatTrio)) {
+        msgs.push(`⚠️ ${loc}は「過去と同じ3人」を完全には避けられませんでした（赤枠のグループ）。`);
+      }
+      if (locGroups.some(g => g.recentPairs.length)) {
+        msgs.push(`ℹ️ ${loc}は人数の都合で、直近に同じグループだった2人が一部重なっています（黄枠のグループ）。`);
+      }
     });
 
     if (msgs.length) {
@@ -311,7 +459,8 @@ function renderStats(total) {
     <div class="stat"><div class="stat-num" style="color:var(--c1)">${groupCount('東京')}</div><div class="stat-label">東京</div></div>
     <div class="stat"><div class="stat-num" style="color:var(--c2)">${groupCount('大阪')}</div><div class="stat-label">大阪</div></div>
     <div class="stat"><div class="stat-num" style="color:var(--c3)">${groupCount('その他')}</div><div class="stat-label">その他</div></div>
-    <div class="stat"><div class="stat-num" style="color:var(--err)">${unmatched}</div><div class="stat-label">未割当</div></div>`;
+    <div class="stat"><div class="stat-num" style="color:var(--err)">${unmatched}</div><div class="stat-label">未割当</div></div>
+    <div class="stat"><div class="stat-num" style="color:var(--c4)">${historyInfo ? historyInfo.groupCount : '-'}</div><div class="stat-label">履歴グループ</div></div>`;
 }
 
 function filterLoc(loc) {
@@ -322,6 +471,14 @@ function filterLoc(loc) {
 
 function visibleLocations() {
   return currentLoc === 'all' ? LOCATIONS : [currentLoc];
+}
+
+function groupNotes(g) {
+  const notes = [];
+  if (g.sameTeam) notes.push('全員同じチーム');
+  if (g.repeatTrio) notes.push('過去と同じ3人を含む');
+  g.recentPairs.forEach(([a, b]) => notes.push(`直近で同席：${escapeHtml(a.name)}・${escapeHtml(b.name)}`));
+  return notes;
 }
 
 function renderGroups() {
@@ -335,7 +492,9 @@ function renderGroups() {
     html += `<div class="loc-heading"><span class="badge ${badgeClass[loc]}">${loc}</span>
       <span class="count">${groups.length}グループ / ${n}名</span></div>`;
     groups.forEach(g => {
-      html += `<div class="group-card${g.ok ? '' : ' bad'}">
+      const notes = groupNotes(g);
+      const cls = !g.ok ? ' bad' : g.recentPairs.length ? ' soft' : '';
+      html += `<div class="group-card${cls}">
         <div class="group-head">
           <span class="group-no">G${String(g.no).padStart(2, '0')}</span>
           <span class="badge ${badgeClass[loc]}">${loc}</span>
@@ -345,6 +504,7 @@ function renderGroups() {
           <div class="person-name">${escapeHtml(p.name)}</div>
           <div class="person-meta">${escapeHtml(p.team)}${p.roles.length ? ' · ' + escapeHtml(p.roles.join('・')) : ''}${p.bucket === 'その他' ? ' · ' + escapeHtml(p.location) : ''}</div>
         </div>`).join('')}
+        ${notes.length ? `<div class="group-note">${notes.join('<br>')}</div>` : ''}
       </div>`;
     });
     if (unmatched.length) {
@@ -384,13 +544,15 @@ function copyAnnounce(ev) {
   navigator.clipboard.writeText(lines.join('\n').trim()).then(() => flashButton(ev));
 }
 
+// 履歴シートにそのまま追記できる形式（1行目のヘッダーは履歴シートの初回のみ必要）
 function copyTSV(ev) {
-  const header = 'グループ\t拠点\t氏名\tチーム\t職種\t登録拠点';
+  const header = '実施月\tグループ\t拠点\tuser_id\t氏名\tチーム\t職種\t登録拠点';
   const rows = [];
   visibleLocations().forEach(loc => {
     allGroups.filter(g => g.loc === loc).forEach(g => {
       g.members.forEach(p => {
-        rows.push([`G${String(g.no).padStart(2, '0')}`, loc, p.name, p.team, p.roles.join('・'), p.location].join('\t'));
+        rows.push([currentMonth, `G${String(g.no).padStart(2, '0')}`, loc, p.uid, p.name, p.team,
+          p.roles.join('・'), p.location].join('\t'));
       });
     });
   });

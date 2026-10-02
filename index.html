@@ -23,8 +23,9 @@
       必須列：<code>user_id</code> <code>first_name_ja</code> <code>last_name_ja</code> <code>location_name</code> <code>team_name</code>（列順は自動検出）<br>
       任意列：<code>category_type</code> <code>tag_name</code>（<code>category_type</code> が <code>3</code> の行を <strong>職種</strong> として表示に使います）<br>
       拠点は <strong>東京・大阪・その他</strong>（東京・大阪以外はすべて「その他」）に分けて、拠点ごとに3人組をつくります。<br>
-      <strong>3人全員が同じチーム</strong>になる組み合わせだけは作りません。職種の被りは気にしません。<br>
-      3で割り切れない場合は、一部のグループを4人組にします。
+      <strong>3人全員が同じチーム</strong>になる組み合わせは作りません。職種の被りは気にしません。<br>
+      3で割り切れない場合は、一部のグループを4人組にします。<br>
+      履歴を貼り付けると、<strong>過去と同じ3人</strong>（4人組に含まれる場合も）を作らず、<strong>直近で同じグループだった2人</strong>もなるべく避けます。
     </div>
     <textarea id="raw-data" placeholder="tag_id&#9;tag_name&#9;user_id&#9;first_name_ja&#9;last_name_ja&#9;...&#9;location_name&#9;category_type&#9;category_name&#9;team_id&#9;team_name&#9;email&#9;join_date&#9;birthday
 （スプレッドシートをそのままコピー＆ペーストしてください）"></textarea>
@@ -41,6 +42,26 @@
         <input id="announce-title" type="text" value="【シャッフルランチ】今回のランチメンバーが決まりました！🍱">
         <label class="exclude-label" style="margin-top:12px">アナウンス締めの一言（任意）</label>
         <input id="announce-footer" type="text" value="各グループで日程を調整して、ランチに行ってきてください！">
+      </div>
+    </div>
+
+    <div class="history-block">
+      <label class="exclude-label">過去のマッチング履歴（任意）</label>
+      <div class="exclude-hint">履歴シートを <strong>全選択 → コピー</strong> して貼り付けてください。必須列：<code>実施月</code> <code>グループ</code> <code>user_id</code>（<code>user_id</code> がない場合は <code>氏名</code> で照合）。結果画面の「TSVコピー」をそのまま履歴シートに追記すればこの形式になります。</div>
+      <textarea id="history-data" class="exclude-textarea" placeholder="実施月&#9;グループ&#9;拠点&#9;user_id&#9;氏名&#9;チーム&#9;職種&#9;登録拠点
+2026-10&#9;G01&#9;東京&#9;15facc32-...&#9;佐藤 太郎&#9;TAMTO&#9;エンジニア&#9;東京"></textarea>
+      <div class="setting-row">
+        <label class="exclude-label">今回の実施月<input id="current-month" type="month"></label>
+        <label class="exclude-label">同じ2人を避ける期間
+          <select id="pair-window">
+            <option value="0">避けない</option>
+            <option value="1">直近1か月</option>
+            <option value="2">直近2か月</option>
+            <option value="3" selected>直近3か月</option>
+            <option value="6">直近6か月</option>
+            <option value="12">直近12か月</option>
+          </select>
+        </label>
       </div>
     </div>
 
