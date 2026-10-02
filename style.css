@@ -208,3 +208,14 @@ input[type=month]{
 .group-card.soft{border-color:#ecdcae;background:#FBF6E8;}
 .group-note{font-size:11.5px;margin-top:8px;padding-top:6px;border-top:1px solid var(--border);color:var(--err);}
 .group-card.soft .group-note{color:#6b4a00;}
+/* 確定チェック・部分シャッフル */
+.keep{
+  display:inline-flex;align-items:center;gap:4px;margin-left:8px;
+  font-size:11.5px;color:var(--text2);cursor:pointer;user-select:none;
+}
+.keep input{accent-color:var(--accent);width:15px;height:15px;cursor:pointer;}
+.group-card.locked{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent);}
+.group-card.locked .keep{color:var(--accent);font-weight:700;}
+.lock-status{font-size:12px;color:var(--text3);font-family:'DM Mono',monospace;}
+button:disabled{opacity:0.45;cursor:not-allowed;}
+button:disabled:active{transform:none;}

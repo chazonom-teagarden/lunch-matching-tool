@@ -85,7 +85,9 @@
     </div>
 
     <div class="filter-row">
-      <button onclick="parseAndRun()">🔀 シャッフルし直す</button>
+      <button onclick="parseAndRun(true)">🔀 全部シャッフルし直す</button>
+      <button id="partial-btn" onclick="reshuffleUnlocked()">🔀 チェックなしだけシャッフル</button>
+      <span id="lock-status" class="lock-status"></span>
       <div class="copy-group">
         <button class="copy-btn" onclick="copyAnnounce(event)">📣 アナウンス文をコピー</button>
         <button class="copy-btn" onclick="copyTSV(event)">📋 TSVコピー（スプレッドシートに貼付け）</button>

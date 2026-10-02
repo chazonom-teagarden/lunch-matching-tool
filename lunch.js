@@ -28,11 +28,14 @@ function buildSample() {
 // 状態
 // =============================================
 const LOCATIONS = ['東京', '大阪', 'その他'];
-let allGroups = [];      // { no, loc, members: [person], ok, repeatTrio, recentPairs }
+let allGroups = [];      // { no, loc, members: [person], ok, repeatTrio, recentPairs, locked, sameAsBefore }
 let unmatchedByLoc = {}; // loc → [person]（人数不足でグループにできなかった人）
 let currentLoc = 'all';
 let currentMonth = '';   // 'YYYY-MM'
 let historyInfo = null;  // 読み込んだ履歴の集計
+let lastHist = null;     // 部分シャッフル時に使い回す履歴
+let baseMsgs = [];       // データ読み込み時のメッセージ（部分シャッフル後も表示し続ける）
+let participantCount = 0;
 
 // =============================================
 // UI操作
@@ -294,13 +297,25 @@ function inspectGroup(members, hist) {
   return { sameTeam, repeatTrio, recentPairs };
 }
 
-function groupCost(members, hist) {
-  const r = inspectGroup(members, hist);
-  return (r.sameTeam ? HARD : 0) + (r.repeatTrio ? HARD : 0) + r.recentPairs.length;
+// avoid: 部分シャッフル時の「シャッフル前の組み合わせ」{ trios, pairs }
+//   同じ3人に戻る → SOFT_TRIO点（履歴NGより優先度は低い）、同じ2人 → 1点
+const SOFT_TRIO = 100;
+
+function sameAsAvoid(members, avoid) {
+  return !!avoid && combos(members.map(p => p.uid), 3).some(c => avoid.trios.has(comboKey(c)));
 }
 
-function makeGroups(people, hist) {
-  const sizes = groupSizes(people.length);
+function groupCost(members, hist, avoid) {
+  const r = inspectGroup(members, hist);
+  let cost = (r.sameTeam ? HARD : 0) + (r.repeatTrio ? HARD : 0) + r.recentPairs.length;
+  if (avoid) {
+    if (sameAsAvoid(members, avoid)) cost += SOFT_TRIO;
+    cost += combos(members, 2).filter(([a, b]) => avoid.pairs.has(comboKey([a.uid, b.uid]))).length;
+  }
+  return cost;
+}
+
+function makeGroups(people, hist, sizes = groupSizes(people.length), avoid = null) {
   if (!sizes.length) return [];
 
   // 探索中の入れ替え位置は軽い Math.random で選ぶ（初期の並びは crypto で十分ランダム）
@@ -312,7 +327,7 @@ function makeGroups(people, hist) {
     const groups = [];
     let k = 0;
     sizes.forEach(s => { groups.push(pool.slice(k, k + s)); k += s; });
-    const costs = groups.map(g => groupCost(g, hist));
+    const costs = groups.map(g => groupCost(g, hist, avoid));
     let total = costs.reduce((a, b) => a + b, 0);
     let lastImproved = 0;
 
@@ -324,7 +339,7 @@ function makeGroups(people, hist) {
       if (b >= a) b++;
       const i = rnd(groups[a].length), j = rnd(groups[b].length);
       [groups[a][i], groups[b][j]] = [groups[b][j], groups[a][i]];
-      const ca = groupCost(groups[a], hist), cb = groupCost(groups[b], hist);
+      const ca = groupCost(groups[a], hist, avoid), cb = groupCost(groups[b], hist, avoid);
       const delta = ca + cb - costs[a] - costs[b];
       if (delta <= 0) {
         if (delta < 0) lastImproved = iter;
@@ -344,7 +359,9 @@ function makeGroups(people, hist) {
 // =============================================
 // 実行
 // =============================================
-function parseAndRun() {
+function parseAndRun(fromReshuffleButton) {
+  if (fromReshuffleButton && allGroups.some(g => g.locked) &&
+      !confirm('「確定」にチェックしたグループも含めて、すべてシャッフルし直します。よろしいですか？')) return;
   const raw = document.getElementById('raw-data').value;
   const errEl = document.getElementById('parse-err');
   errEl.style.display = 'none';
@@ -398,6 +415,8 @@ function parseAndRun() {
       }
     }
 
+    lastHist = hist;
+    participantCount = people.length;
     allGroups = [];
     unmatchedByLoc = {};
     let no = 1;
@@ -410,29 +429,13 @@ function parseAndRun() {
           members.map(p => escapeHtml(p.name)).join('、'));
         return;
       }
-      const groups = makeGroups(members, hist);
-      groups.forEach(g => {
-        const r = inspectGroup(g, hist);
-        allGroups.push({ no: no++, loc, members: g, ok: !r.sameTeam && !r.repeatTrio, ...r });
+      makeGroups(members, hist).forEach(g => {
+        allGroups.push({ no: no++, loc, members: g, locked: false, sameAsBefore: false, ...evaluate(g, hist) });
       });
-      const locGroups = allGroups.filter(g => g.loc === loc);
-      if (locGroups.some(g => g.sameTeam)) {
-        msgs.push(`⚠️ ${loc}は特定チームの人数が多いため、「全員同じチーム」のグループを完全には避けられませんでした（赤枠のグループ）。`);
-      }
-      if (locGroups.some(g => g.repeatTrio)) {
-        msgs.push(`⚠️ ${loc}は「過去と同じ3人」を完全には避けられませんでした（赤枠のグループ）。`);
-      }
-      if (locGroups.some(g => g.recentPairs.length)) {
-        msgs.push(`ℹ️ ${loc}は人数の都合で、直近に同じグループだった2人が一部重なっています（黄枠のグループ）。`);
-      }
     });
 
-    if (msgs.length) {
-      errEl.innerHTML = msgs.join('<br><br>');
-      errEl.classList.add('warn');
-      errEl.style.display = 'block';
-    }
-
+    baseMsgs = msgs;
+    showMessages();
     renderStats(people.length);
     renderGroups();
     document.getElementById('result-section').style.display = 'block';
@@ -443,6 +446,75 @@ function parseAndRun() {
     errEl.classList.remove('warn');
     errEl.style.display = 'block';
   }
+}
+
+function evaluate(members, hist) {
+  const r = inspectGroup(members, hist);
+  return { ok: !r.sameTeam && !r.repeatTrio, ...r };
+}
+
+// 拠点ごとの「避けきれなかった」警告（グループの状態から毎回作り直す）
+function groupWarnings() {
+  const msgs = [];
+  LOCATIONS.forEach(loc => {
+    const locGroups = allGroups.filter(g => g.loc === loc);
+    if (locGroups.some(g => g.sameTeam)) {
+      msgs.push(`⚠️ ${loc}は特定チームの人数が多いため、「全員同じチーム」のグループを完全には避けられませんでした（赤枠のグループ）。`);
+    }
+    if (locGroups.some(g => g.repeatTrio)) {
+      msgs.push(`⚠️ ${loc}は「過去と同じ3人」を完全には避けられませんでした（赤枠のグループ）。`);
+    }
+    if (locGroups.some(g => g.recentPairs.length)) {
+      msgs.push(`ℹ️ ${loc}は人数の都合で、直近に同じグループだった2人が一部重なっています（黄枠のグループ）。`);
+    }
+  });
+  return msgs;
+}
+
+function showMessages(extra = []) {
+  const errEl = document.getElementById('parse-err');
+  const msgs = [...baseMsgs, ...groupWarnings(), ...extra];
+  errEl.innerHTML = msgs.join('<br><br>');
+  errEl.classList.add('warn');
+  errEl.style.display = msgs.length ? 'block' : 'none';
+}
+
+// =============================================
+// 部分シャッフル
+//
+// 「確定」にチェックしたグループはそのまま残し、チェックのないグループの
+// メンバーだけを拠点ごとに集めて組み直す（グループ番号・人数構成は維持）。
+// シャッフル前と同じ3人に戻らないようにし、同じだった2人もなるべく離す。
+// =============================================
+function toggleLock(no, checked) {
+  const g = allGroups.find(x => x.no === no);
+  if (g) g.locked = checked;
+  renderGroups();
+}
+
+function reshuffleUnlocked() {
+  const extra = [];
+  LOCATIONS.forEach(loc => {
+    const targets = allGroups.filter(g => g.loc === loc && !g.locked);
+    if (!targets.length) return;
+    if (targets.length === 1) {
+      extra.push(`ℹ️ ${loc}はチェックなしのグループが1つだけのため、組み直せませんでした（2つ以上必要です）。`);
+      return;
+    }
+    const avoid = { trios: new Set(), pairs: new Set() };
+    targets.forEach(g => {
+      combos(g.members.map(p => p.uid), 3).forEach(c => avoid.trios.add(comboKey(c)));
+      combos(g.members.map(p => p.uid), 2).forEach(c => avoid.pairs.add(comboKey(c)));
+    });
+    const members = targets.flatMap(g => g.members);
+    const newGroups = makeGroups(members, lastHist, targets.map(g => g.members.length), avoid);
+    targets.forEach((g, i) => {
+      Object.assign(g, { members: newGroups[i], sameAsBefore: sameAsAvoid(newGroups[i], avoid), ...evaluate(newGroups[i], lastHist) });
+    });
+  });
+  if (!allGroups.some(g => !g.locked)) extra.push('ℹ️ すべてのグループが「確定」になっています。');
+  showMessages(extra);
+  renderGroups();
 }
 
 // =============================================
@@ -476,6 +548,7 @@ function visibleLocations() {
 function groupNotes(g) {
   const notes = [];
   if (g.sameTeam) notes.push('全員同じチーム');
+  if (g.sameAsBefore) notes.push('シャッフル前と同じ3人を含む（組み直す相手が足りません）');
   if (g.repeatTrio) notes.push('過去と同じ3人を含む');
   g.recentPairs.forEach(([a, b]) => notes.push(`直近で同席：${escapeHtml(a.name)}・${escapeHtml(b.name)}`));
   return notes;
@@ -493,12 +566,13 @@ function renderGroups() {
       <span class="count">${groups.length}グループ / ${n}名</span></div>`;
     groups.forEach(g => {
       const notes = groupNotes(g);
-      const cls = !g.ok ? ' bad' : g.recentPairs.length ? ' soft' : '';
+      const cls = (!g.ok ? ' bad' : g.recentPairs.length ? ' soft' : '') + (g.locked ? ' locked' : '');
       html += `<div class="group-card${cls}">
         <div class="group-head">
           <span class="group-no">G${String(g.no).padStart(2, '0')}</span>
           <span class="badge ${badgeClass[loc]}">${loc}</span>
           <span class="group-size">${g.members.length}人</span>
+          <label class="keep"><input type="checkbox" ${g.locked ? 'checked' : ''} onchange="toggleLock(${g.no}, this.checked)">確定</label>
         </div>
         ${g.members.map(p => `<div class="member">
           <div class="person-name">${escapeHtml(p.name)}</div>
@@ -512,6 +586,13 @@ function renderGroups() {
     }
   });
   area.innerHTML = html || '<div class="empty">グループがありません</div>';
+
+  const unlocked = allGroups.filter(g => !g.locked).length;
+  const locked = allGroups.length - unlocked;
+  const btn = document.getElementById('partial-btn');
+  btn.disabled = unlocked < 2;
+  btn.innerHTML = `🔀 チェックなしの${unlocked}組だけシャッフル`;
+  document.getElementById('lock-status').textContent = `確定 ${locked} / ${allGroups.length}組`;
 }
 
 // =============================================
